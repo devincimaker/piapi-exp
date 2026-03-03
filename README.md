@@ -73,6 +73,7 @@ On complete failure it also includes `candidate_attempts`.
 The converter now creates an explicit `scene_plan`:
 - Splits story into sentences
 - Scores sentence visual strength (setting/action/tension/twist signals)
+- Enforces narrative anchors when possible: setup -> trigger -> escalation -> twist
 - Picks scene anchors across the full arc
 - Assigns per-scene durations
 - Builds one prompt per scene (+ simplified retry prompt)

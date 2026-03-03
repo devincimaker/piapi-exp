@@ -386,42 +386,149 @@ function dedupe(items) {
   return output;
 }
 
-function pickSceneSentences(storyText, sceneCount) {
+const ROLE_PATTERNS = {
+  setup: [
+    /\b(i|we)\b.{0,24}\b(love|loved|live|owned|keep|kept|work|worked|normal|usual|every day|every morning)\b/i,
+    /\bhome|house|apartment|kitchen|morning|routine|ordinary|normal\b/i
+  ],
+  trigger: [
+    /\b(hit|crash|crashed|killed|died|dead|stole|lost|accident|drunk driving|ran over|broke)\b/i,
+    /\bwhen you|when he|when she|that day|that night\b/i
+  ],
+  escalation: [
+    /\b(angry|revenge|scared|panic|panicked|gag|ropes|circle|demon|ritual|basement|whisper|shadow|blood|body)\b/i,
+    /\b(struggle|scream|horrifying|terrifying|stare|stared|holding)\b/i
+  ],
+  twist: [
+    /\b(so why|shouldn't you|not alone|it was me|behind me|actually|the truth|in the end|all along)\b/i,
+    /\b(reveal|finally|until|except)\b/i
+  ]
+};
+
+const ROLE_TARGETS = {
+  setup: 0.1,
+  trigger: 0.35,
+  escalation: 0.65,
+  twist: 0.9
+};
+
+function countPatternHits(text, patterns) {
+  let count = 0;
+  for (const pattern of patterns) {
+    if (pattern.test(text)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function scoreSentenceForRole(sentence, idx, totalSentences, role) {
+  const lower = sentence.toLowerCase();
+  const hits = countPatternHits(lower, ROLE_PATTERNS[role] || []);
+  const pos = totalSentences <= 1 ? 0 : idx / (totalSentences - 1);
+  const target = ROLE_TARGETS[role] || 0.5;
+  const positionBonus = Math.max(0, 1.5 - Math.abs(pos - target) * 2.4);
+
+  let score = hits * 1.7 + positionBonus;
+  if (role === "setup" && idx === 0) score += 0.8;
+  if (role === "twist" && idx === totalSentences - 1) score += 0.9;
+  if (sentence.length > 180) score -= 0.4;
+  if (sentence.length < 20) score -= 0.8;
+
+  return score;
+}
+
+function pickBestIndexForRole(sentences, role, usedIndices) {
+  let bestIdx = -1;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < sentences.length; i += 1) {
+    if (usedIndices.has(i)) continue;
+    const score = scoreSentenceForRole(sentences[i], i, sentences.length, role);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+
+  if (bestIdx >= 0) {
+    return bestIdx;
+  }
+
+  const target = ROLE_TARGETS[role] || 0.5;
+  const fallback = Math.round((sentences.length - 1) * target);
+  for (let radius = 0; radius < sentences.length; radius += 1) {
+    const left = fallback - radius;
+    const right = fallback + radius;
+    if (left >= 0 && !usedIndices.has(left)) return left;
+    if (right < sentences.length && !usedIndices.has(right)) return right;
+  }
+  return 0;
+}
+
+function pickExtraEscalationIndices(sentences, usedIndices, needed) {
+  if (needed <= 0) return [];
+  const ranked = [];
+  for (let i = 0; i < sentences.length; i += 1) {
+    if (usedIndices.has(i)) continue;
+    ranked.push({
+      idx: i,
+      score: scoreSentenceForRole(sentences[i], i, sentences.length, "escalation")
+    });
+  }
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, needed).map((entry) => entry.idx);
+}
+
+function buildNarrativeSceneLines(storyText, sceneCount) {
   const sentences = splitSentences(storyText).filter((s) => s.length >= 20);
   if (!sentences.length) {
     return [];
   }
 
-  const withScores = sentences.map((sentence, idx) => {
-    let score = 0;
-    if (/\b(door|window|hallway|basement|kitchen|forest|room|stairs)\b/i.test(sentence)) score += 1.2;
-    if (/\b(saw|heard|opened|turned|ran|walked|stopped|locked|hid|followed|found)\b/i.test(sentence)) score += 1.5;
-    if (/\b(suddenly|then|until|except|behind|realized|whisper|shadow|cold)\b/i.test(sentence)) score += 1.4;
-    if (idx === 0) score += 1.2;
-    if (idx === sentences.length - 1) score += 1.8;
-    if (sentence.length > 180) score -= 0.7;
-    return { idx, sentence, score };
-  });
+  const used = new Set();
+  const setupIdx = pickBestIndexForRole(sentences, "setup", used);
+  used.add(setupIdx);
+  const triggerIdx = pickBestIndexForRole(sentences, "trigger", used);
+  used.add(triggerIdx);
+  const escalationIdx = pickBestIndexForRole(sentences, "escalation", used);
+  used.add(escalationIdx);
+  const twistIdx = pickBestIndexForRole(sentences, "twist", used);
+  used.add(twistIdx);
 
-  const sorted = [...withScores].sort((a, b) => b.score - a.score);
-  const selected = sorted.slice(0, Math.min(sceneCount * 2, sorted.length)).sort((a, b) => a.idx - b.idx);
-  const distilled = selected.map((s) => s.sentence);
-  const unique = dedupe(distilled);
-
-  if (unique.length >= sceneCount) {
-    const result = [];
-    for (let i = 0; i < sceneCount; i += 1) {
-      const idx = Math.round((unique.length - 1) * (i / Math.max(sceneCount - 1, 1)));
-      result.push(unique[idx]);
-    }
-    return dedupe(result).slice(0, sceneCount);
+  if (sceneCount <= 1) {
+    return [truncate(`${sentences[triggerIdx]} ${sentences[twistIdx]}`, 180)];
+  }
+  if (sceneCount === 2) {
+    return [
+      sentences[setupIdx],
+      truncate(`${sentences[triggerIdx]} ${sentences[twistIdx]}`, 180)
+    ];
+  }
+  if (sceneCount === 3) {
+    return [sentences[setupIdx], sentences[triggerIdx], sentences[twistIdx]];
   }
 
+  const middleNeeded = sceneCount - 3;
+  const middleIndices = [escalationIdx, ...pickExtraEscalationIndices(sentences, used, middleNeeded - 1)]
+    .slice(0, middleNeeded);
+
+  const lines = [
+    sentences[setupIdx],
+    sentences[triggerIdx],
+    ...middleIndices.map((idx) => sentences[idx]),
+    sentences[twistIdx]
+  ];
+
+  const uniqueLines = dedupe(lines);
   const fallback = dedupe(sentences);
-  while (fallback.length < sceneCount) {
-    fallback.push(fallback[fallback.length - 1] || sentences[0]);
+  let fallbackIdx = 0;
+  while (uniqueLines.length < sceneCount && fallbackIdx < fallback.length) {
+    if (!uniqueLines.includes(fallback[fallbackIdx])) {
+      uniqueLines.push(fallback[fallbackIdx]);
+    }
+    fallbackIdx += 1;
   }
-  return fallback.slice(0, sceneCount);
+  return uniqueLines.slice(0, sceneCount);
 }
 
 function getSceneCount(totalSeconds, sceneDuration, maxScenes) {
@@ -439,8 +546,16 @@ function getSceneCount(totalSeconds, sceneDuration, maxScenes) {
 
 function phaseMultiplier(phase) {
   if (phase === "setup") return 0.82;
+  if (phase === "trigger") return 1.1;
   if (phase === "twist") return 1.35;
   return 1.0;
+}
+
+function phaseForSceneIndex(index, sceneCount) {
+  if (index === 0) return "setup";
+  if (index === sceneCount - 1) return "twist";
+  if (index === 1 && sceneCount >= 3) return "trigger";
+  return "escalation";
 }
 
 function scoreSceneIntensity(sceneLine, phase) {
@@ -542,13 +657,15 @@ function allocateAdaptiveDurations(sceneSeeds, totalSeconds) {
 function buildScenePlan(storyText, targetSeconds, sceneDuration, maxScenes, adaptiveDurations) {
   const totalSeconds = Math.max(1, Math.round(targetSeconds));
   const sceneCount = getSceneCount(totalSeconds, sceneDuration, maxScenes);
-  const chosenSentences = pickSceneSentences(storyText, sceneCount);
-  const sceneTexts = chosenSentences.length ? chosenSentences : buildBeatOutline(storyText);
+  const sceneTexts = buildNarrativeSceneLines(storyText, sceneCount);
+  const fallbackBeats = buildBeatOutline(storyText);
 
   const sceneSeeds = [];
   for (let i = 0; i < sceneCount; i += 1) {
-    const line = sanitizeForPg13(sceneTexts[Math.min(i, sceneTexts.length - 1)]);
-    const phase = i === 0 ? "setup" : (i === sceneCount - 1 ? "twist" : "escalation");
+    const fallbackLine = fallbackBeats[Math.min(i, fallbackBeats.length - 1)] || "Uneasy horror moment.";
+    const sourceLine = sceneTexts[i] || fallbackLine;
+    const line = sanitizeForPg13(sourceLine);
+    const phase = phaseForSceneIndex(i, sceneCount);
     sceneSeeds.push({
       phase,
       scene_line: truncate(line, 180),
