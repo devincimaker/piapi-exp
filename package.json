@@ -5,7 +5,8 @@
   "description": "Reddit short scary story to Seedance 2 Fast via PiAPI",
   "scripts": {
     "start": "node scripts/reddit_to_seedance.js",
-    "dry-run": "node scripts/reddit_to_seedance.js --dry-run"
+    "dry-run": "node scripts/reddit_to_seedance.js --dry-run",
+    "daily": "node scripts/daily_scary_story.js"
   },
   "engines": {
     "node": ">=18"

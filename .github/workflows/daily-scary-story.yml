@@ -1,0 +1,47 @@
+name: Daily Scary Story
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 14 * * *"
+
+jobs:
+  generate-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      PIAPI_KEY: ${{ secrets.PIAPI_KEY }}
+      PUBLISH_WEBHOOK_URL: ${{ secrets.PUBLISH_WEBHOOK_URL }}
+      PUBLISH_MODE: ${{ vars.PUBLISH_MODE || 'local' }}
+      TARGET_SECONDS: ${{ vars.TARGET_SECONDS || '20' }}
+      SCENE_DURATION: ${{ vars.SCENE_DURATION || '5' }}
+      MAX_SCENES: ${{ vars.MAX_SCENES || '4' }}
+      REDDIT_LIMIT: ${{ vars.REDDIT_LIMIT || '30' }}
+      REDDIT_TIME: ${{ vars.REDDIT_TIME || 'week' }}
+      ASPECT_RATIO: ${{ vars.ASPECT_RATIO || '16:9' }}
+      OUTPUT_DIR: outputs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate PIAPI key
+        run: |
+          if [ -z "$PIAPI_KEY" ]; then
+            echo "PIAPI_KEY secret is required"
+            exit 1
+          fi
+
+      - name: Run daily pipeline
+        run: node scripts/daily_scary_story.js
+
+      - name: Upload outputs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-scary-story-outputs
+          path: outputs
+          if-no-files-found: warn
