@@ -1,0 +1,13 @@
+{
+  "name": "piapi-exp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reddit short scary story to Seedance 2 Fast via PiAPI",
+  "scripts": {
+    "start": "node scripts/reddit_to_seedance.js",
+    "dry-run": "node scripts/reddit_to_seedance.js --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
