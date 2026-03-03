@@ -72,6 +72,8 @@ The converter now creates an explicit `scene_plan`:
 - Builds one prompt per scene (+ simplified retry prompt)
 
 If `target-seconds` > `scene-duration`, the script generates multiple scene clips.
+By default, scene durations are adaptive per story beat (setup tends shorter, twist tends longer).
+Use `--fixed-scene-duration` to disable this behavior.
 
 ## Publishing
 
@@ -92,7 +94,7 @@ Workflow file:
 Set in GitHub repo settings:
 - Secret: `PIAPI_KEY` (required)
 - Secret: `PUBLISH_WEBHOOK_URL` (required only if webhook mode is used)
-- Variables (optional): `PUBLISH_MODE`, `TARGET_SECONDS`, `SCENE_DURATION`, `MAX_SCENES`, `REDDIT_LIMIT`, `REDDIT_TIME`
+- Variables (optional): `PUBLISH_MODE`, `TARGET_SECONDS`, `SCENE_DURATION`, `MAX_SCENES`, `ADAPTIVE_DURATIONS`, `REDDIT_LIMIT`, `REDDIT_TIME`
 
 ## Notes
 

@@ -45,6 +45,12 @@ async function main() {
     "--output-dir", envOrDefault("OUTPUT_DIR", "outputs")
   ];
 
+  if (envOrDefault("ADAPTIVE_DURATIONS", "true") === "false") {
+    args.push("--fixed-scene-duration");
+  } else {
+    args.push("--adaptive-durations");
+  }
+
   if (envOrDefault("DRY_RUN", "false") === "true") {
     args.push("--dry-run");
   }

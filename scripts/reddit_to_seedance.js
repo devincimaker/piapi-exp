@@ -20,6 +20,7 @@ const DEFAULTS = {
   pollSeconds: 8,
   maxPollMinutes: 20,
   storyFallbacks: 1,
+  adaptiveDurations: true,
   publish: false,
   publishMode: "local",
   outputDir: "outputs",
@@ -102,6 +103,12 @@ function parseArgs(argv) {
         break;
       case "story-fallbacks":
         args.storyFallbacks = Number(value);
+        break;
+      case "adaptive-durations":
+        args.adaptiveDurations = value !== "false";
+        break;
+      case "fixed-scene-duration":
+        args.adaptiveDurations = false;
         break;
       case "publish":
         args.publish = value !== "false";
@@ -191,6 +198,8 @@ Options:
   --poll-seconds <n>          Poll interval seconds (default: 8)
   --max-poll-minutes <n>      Poll timeout minutes (default: 20)
   --story-fallbacks <n>       Extra stories to try after first fails (default: 1)
+  --adaptive-durations        Allocate per-scene duration from story intensity (default: true)
+  --fixed-scene-duration      Disable adaptive timing and use mostly fixed scene duration
   --daily-rotation            Pick daily story by date index instead of always highest score
   --publish                   Publish output after successful generation
   --publish-mode <mode>       local | webhook | both (default: local)
@@ -415,27 +424,156 @@ function pickSceneSentences(storyText, sceneCount) {
   return fallback.slice(0, sceneCount);
 }
 
-function buildScenePlan(storyText, targetSeconds, sceneDuration) {
-  const sceneCount = Math.max(1, Math.ceil(targetSeconds / sceneDuration));
+function getSceneCount(totalSeconds, sceneDuration, maxScenes) {
+  let sceneCount = Math.max(1, Math.ceil(totalSeconds / Math.max(1, sceneDuration)));
+  sceneCount = Math.min(sceneCount, maxScenes);
+
+  while (sceneCount * 10 < totalSeconds && sceneCount < maxScenes) {
+    sceneCount += 1;
+  }
+  while (sceneCount > totalSeconds && sceneCount > 1) {
+    sceneCount -= 1;
+  }
+  return sceneCount;
+}
+
+function phaseMultiplier(phase) {
+  if (phase === "setup") return 0.82;
+  if (phase === "twist") return 1.35;
+  return 1.0;
+}
+
+function scoreSceneIntensity(sceneLine, phase) {
+  let score = 1.0;
+  if (/\b(saw|heard|opened|turned|ran|walked|stopped|locked|hid|followed|found|grabbed)\b/i.test(sceneLine)) {
+    score += 0.55;
+  }
+  if (/\b(suddenly|until|except|behind|realized|whisper|shadow|cold|dark|scream|silence)\b/i.test(sceneLine)) {
+    score += 0.65;
+  }
+  if (/\b(reveal|truth|finally|then|at last|it was|it is)\b/i.test(sceneLine)) {
+    score += 0.35;
+  }
+  if (sceneLine.length > 130) {
+    score += 0.25;
+  }
+  return Number((score * phaseMultiplier(phase)).toFixed(3));
+}
+
+function allocateFixedDurations(sceneCount, totalSeconds, sceneDuration) {
+  const durations = Array(sceneCount).fill(Math.max(1, Math.min(10, Math.round(sceneDuration))));
+  let sum = durations.reduce((acc, value) => acc + value, 0);
+
+  while (sum > totalSeconds) {
+    let changed = false;
+    for (let i = durations.length - 1; i >= 0 && sum > totalSeconds; i -= 1) {
+      if (durations[i] > 1) {
+        durations[i] -= 1;
+        sum -= 1;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  while (sum < totalSeconds) {
+    let changed = false;
+    for (let i = durations.length - 1; i >= 0 && sum < totalSeconds; i -= 1) {
+      if (durations[i] < 10) {
+        durations[i] += 1;
+        sum += 1;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return durations;
+}
+
+function allocateAdaptiveDurations(sceneSeeds, totalSeconds) {
+  const minPerScene = 1;
+  const maxPerScene = 10;
+  const weights = sceneSeeds.map((scene) => Math.max(0.1, scene.duration_weight));
+  const sumWeights = weights.reduce((acc, value) => acc + value, 0) || sceneSeeds.length;
+
+  const ideal = weights.map((weight) => (weight / sumWeights) * totalSeconds);
+  const durations = ideal.map((seconds) => Math.max(minPerScene, Math.min(maxPerScene, Math.floor(seconds))));
+  let sum = durations.reduce((acc, value) => acc + value, 0);
+
+  // Ensure each scene keeps at least 1 second.
+  while (sum < totalSeconds) {
+    let bestIdx = -1;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < sceneSeeds.length; i += 1) {
+      if (durations[i] >= maxPerScene) continue;
+      const fit = ideal[i] - durations[i];
+      const score = fit + (sceneSeeds[i].phase === "twist" ? 0.15 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) break;
+    durations[bestIdx] += 1;
+    sum += 1;
+  }
+
+  while (sum > totalSeconds) {
+    let bestIdx = -1;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < sceneSeeds.length; i += 1) {
+      if (durations[i] <= minPerScene) continue;
+      const over = durations[i] - ideal[i];
+      const score = over + (sceneSeeds[i].phase === "setup" ? 0.1 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) break;
+    durations[bestIdx] -= 1;
+    sum -= 1;
+  }
+
+  return durations;
+}
+
+function buildScenePlan(storyText, targetSeconds, sceneDuration, maxScenes, adaptiveDurations) {
+  const totalSeconds = Math.max(1, Math.round(targetSeconds));
+  const sceneCount = getSceneCount(totalSeconds, sceneDuration, maxScenes);
   const chosenSentences = pickSceneSentences(storyText, sceneCount);
   const sceneTexts = chosenSentences.length ? chosenSentences : buildBeatOutline(storyText);
 
-  const scenes = [];
-  let elapsed = 0;
+  const sceneSeeds = [];
   for (let i = 0; i < sceneCount; i += 1) {
-    const remaining = targetSeconds - elapsed;
-    const seconds = i === sceneCount - 1 ? remaining : Math.min(sceneDuration, remaining);
     const line = sanitizeForPg13(sceneTexts[Math.min(i, sceneTexts.length - 1)]);
     const phase = i === 0 ? "setup" : (i === sceneCount - 1 ? "twist" : "escalation");
+    sceneSeeds.push({
+      phase,
+      scene_line: truncate(line, 180),
+      duration_weight: scoreSceneIntensity(line, phase)
+    });
+  }
 
+  const durations = adaptiveDurations
+    ? allocateAdaptiveDurations(sceneSeeds, totalSeconds)
+    : allocateFixedDurations(sceneCount, totalSeconds, sceneDuration);
+
+  const scenes = [];
+  let elapsed = 0;
+  for (let i = 0; i < sceneSeeds.length; i += 1) {
+    const seed = sceneSeeds[i];
+    const seconds = durations[i];
     scenes.push({
       scene_index: i + 1,
       total_scenes: sceneCount,
-      phase,
+      phase: seed.phase,
       seconds,
       start_sec: elapsed,
       end_sec: elapsed + seconds,
-      scene_line: truncate(line, 180)
+      duration_weight: seed.duration_weight,
+      scene_line: seed.scene_line
     });
     elapsed += seconds;
   }
@@ -497,9 +635,14 @@ function buildScriptPackage(post, args) {
     "no watermark"
   ];
 
-  const totalSeconds = Math.min(args.targetSeconds, args.maxScenes * args.sceneDuration);
-  const scenePlan = buildScenePlan(cleanText, totalSeconds, args.sceneDuration)
-    .slice(0, args.maxScenes)
+  const totalSeconds = Math.min(args.targetSeconds, args.maxScenes * 10);
+  const scenePlan = buildScenePlan(
+    cleanText,
+    totalSeconds,
+    args.sceneDuration,
+    args.maxScenes,
+    args.adaptiveDurations
+  )
     .map((scene) => ({
       ...scene,
       prompt: buildScenePrompt({
@@ -523,7 +666,8 @@ function buildScriptPackage(post, args) {
     retry_prompt: scenePlan[0] ? scenePlan[0].retry_prompt : "",
     negative_constraints: negativeConstraints,
     style_tokens: styleTokens,
-    total_target_seconds: totalSeconds
+    total_target_seconds: totalSeconds,
+    adaptive_durations: args.adaptiveDurations
   };
 }
 
@@ -978,7 +1122,7 @@ async function main() {
 
   logPhase(
     "start",
-    `mode=${args.mode} dry_run=${args.dryRun} subreddit=${args.subreddit} time=${args.time} target=${args.targetSeconds}s scene=${args.sceneDuration}s`
+    `mode=${args.mode} dry_run=${args.dryRun} subreddit=${args.subreddit} time=${args.time} target=${args.targetSeconds}s scene=${args.sceneDuration}s adaptive=${args.adaptiveDurations}`
   );
   const posts = await fetchRedditPosts(args);
   logPhase("fetch_reddit", `received=${posts.length} candidate stories after filtering`);
@@ -1006,7 +1150,8 @@ async function main() {
         scene_plan: scriptPackage.scene_plan,
         seedance_prompt: scriptPackage.seedance_prompt,
         negative_constraints: scriptPackage.negative_constraints,
-        total_target_seconds: scriptPackage.total_target_seconds
+        total_target_seconds: scriptPackage.total_target_seconds,
+        adaptive_durations: scriptPackage.adaptive_durations
       },
       piapi: {
         task_id: "",
@@ -1056,7 +1201,8 @@ async function main() {
           scene_plan: packageForStory.scene_plan,
           seedance_prompt: packageForStory.seedance_prompt,
           negative_constraints: packageForStory.negative_constraints,
-          total_target_seconds: packageForStory.total_target_seconds
+          total_target_seconds: packageForStory.total_target_seconds,
+          adaptive_durations: packageForStory.adaptive_durations
         },
         piapi: {
           task_id: generation.final.task_id,
@@ -1104,7 +1250,8 @@ async function main() {
       scene_plan: scriptPackage.scene_plan,
       seedance_prompt: scriptPackage.seedance_prompt,
       negative_constraints: scriptPackage.negative_constraints,
-      total_target_seconds: scriptPackage.total_target_seconds
+      total_target_seconds: scriptPackage.total_target_seconds,
+      adaptive_durations: scriptPackage.adaptive_durations
     },
     piapi: {
       task_id: lastAttemptDetails ? lastAttemptDetails.task_id : "",
