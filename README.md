@@ -23,6 +23,12 @@ Dry run (no PiAPI call):
 npm run dry-run
 ```
 
+Dry-run now returns a full preflight package:
+- `source_story` (title/link/author/body)
+- `candidate_stories` (scored shortlist)
+- `generation_config` (model + timing + polling config)
+- `scene_plan` and `planned_requests` (exact primary/retry PiAPI payloads per scene)
+
 Full run:
 
 ```bash

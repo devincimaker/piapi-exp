@@ -1017,8 +1017,66 @@ function toStoryOutput(post) {
     id: post.id,
     title: post.title,
     permalink: `${REDDIT_BASE_URL}${post.permalink}`,
-    score: post.video_score
+    score: post.video_score,
+    reasons: post.video_reasons || []
   };
+}
+
+function toSourceStory(post) {
+  return {
+    id: post.id,
+    title: post.title || "",
+    permalink: `${REDDIT_BASE_URL}${post.permalink || ""}`,
+    author: post.author || "",
+    created_utc: post.created_utc || null,
+    ups: Number(post.ups || 0),
+    num_comments: Number(post.num_comments || 0),
+    body: normalizeWhitespace(post.selftext || "")
+  };
+}
+
+function buildGenerationConfig(args) {
+  return {
+    model: "seedance",
+    task_type: args.mode,
+    aspect_ratio: args.aspect,
+    target_seconds: args.targetSeconds,
+    scene_duration_default: args.sceneDuration,
+    max_scenes: args.maxScenes,
+    adaptive_durations: args.adaptiveDurations,
+    poll_seconds: args.pollSeconds,
+    max_poll_minutes: args.maxPollMinutes,
+    story_fallbacks: args.storyFallbacks,
+    daily_rotation: args.dailyRotation
+  };
+}
+
+function buildPlannedRequests(scriptPackage, args) {
+  const scenes = scriptPackage.scene_plan || [];
+  return scenes.map((scene) => ({
+    scene_index: scene.scene_index,
+    phase: scene.phase,
+    seconds: scene.seconds,
+    scene_line: scene.scene_line,
+    primary_request: {
+      model: "seedance",
+      task_type: args.mode,
+      input: {
+        prompt: scene.prompt,
+        duration: scene.seconds,
+        aspect_ratio: args.aspect
+      }
+    },
+    retry_request: {
+      model: "seedance",
+      task_type: args.mode,
+      input: {
+        prompt: scene.retry_prompt,
+        duration: scene.seconds,
+        aspect_ratio: args.aspect
+      }
+    }
+  }));
 }
 
 function safeSlug(input) {
@@ -1140,10 +1198,18 @@ async function main() {
     ...candidates.filter((candidate) => candidate.id !== selectedStory.id)
   ];
   const scriptPackage = buildScriptPackage(selectedStory, args);
+  const sourceStory = toSourceStory(selectedStory);
+  const generationConfig = buildGenerationConfig(args);
+  const plannedRequests = buildPlannedRequests(scriptPackage, args);
+  const candidatePreview = orderedCandidates.map((candidate) => toStoryOutput(candidate));
 
   if (args.dryRun) {
     const payload = {
+      mode: "dry_run_preview",
+      source_story: sourceStory,
       selected_story: toStoryOutput(selectedStory),
+      candidate_stories: candidatePreview,
+      generation_config: generationConfig,
       script_package: {
         hook_line: scriptPackage.hook_line,
         beat_outline: scriptPackage.beat_outline,
@@ -1153,6 +1219,7 @@ async function main() {
         total_target_seconds: scriptPackage.total_target_seconds,
         adaptive_durations: scriptPackage.adaptive_durations
       },
+      planned_requests: plannedRequests,
       piapi: {
         task_id: "",
         status: "dry_run",
@@ -1194,7 +1261,10 @@ async function main() {
     if (generation.success) {
       const clipUrls = (generation.scenes || []).map((scene) => scene.video_url).filter(Boolean);
       const payload = {
+        source_story: toSourceStory(story),
         selected_story: toStoryOutput(story),
+        candidate_stories: candidatePreview,
+        generation_config: generationConfig,
         script_package: {
           hook_line: packageForStory.hook_line,
           beat_outline: packageForStory.beat_outline,
@@ -1204,6 +1274,7 @@ async function main() {
           total_target_seconds: packageForStory.total_target_seconds,
           adaptive_durations: packageForStory.adaptive_durations
         },
+        planned_requests: buildPlannedRequests(packageForStory, args),
         piapi: {
           task_id: generation.final.task_id,
           status: generation.final.status,
@@ -1243,7 +1314,10 @@ async function main() {
     : null;
 
   const failurePayload = {
+    source_story: sourceStory,
     selected_story: toStoryOutput(selectedStory),
+    candidate_stories: candidatePreview,
+    generation_config: generationConfig,
     script_package: {
       hook_line: scriptPackage.hook_line,
       beat_outline: scriptPackage.beat_outline,
@@ -1253,6 +1327,7 @@ async function main() {
       total_target_seconds: scriptPackage.total_target_seconds,
       adaptive_durations: scriptPackage.adaptive_durations
     },
+    planned_requests: plannedRequests,
     piapi: {
       task_id: lastAttemptDetails ? lastAttemptDetails.task_id : "",
       status: lastAttemptDetails ? lastAttemptDetails.status : "failed",
